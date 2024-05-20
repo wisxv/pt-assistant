@@ -1,0 +1,8 @@
+[Unit]
+Description=PT assistant bot
+After=network.target
+
+[Service]
+EnvironmentFile={{ bot_app_path }}/.env
+ExecStart=python3 {{ bot_app_path }}/bot.py
+Restart=always

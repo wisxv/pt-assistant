@@ -1,0 +1,49 @@
+version: '3.8'
+ 
+services:
+  bot:
+    image: 192.168.1.9:5000/bot_image:latest
+    restart: always
+    environment:
+      TOKEN: ${TOKEN}
+      RM_HOST: ${RM_HOST}
+      RM_USER: ${RM_USER}
+      RM_PASSWORD: ${RM_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: 5432
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_DATABASE: ${DB_NAME}
+      
+  postgres_primary:
+    image: 192.168.1.9:5000/db_image:latest
+    ports:
+      - ${DB_PORT}:5432
+      - ${RM_PORT}:22
+    environment:
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+      DB_REPL_USER: ${DB_REPL_USER}
+      DB_REPL_PASSWORD: ${DB_REPL_PASSWORD}
+      RM_USER: ${RM_USER}
+      RM_PASSWORD: ${RM_PASSWORD}
+    volumes:
+      - pgdata_primary:/var/lib/postgresql/data
+
+  postgres_replica:
+    image: 192.168.1.9:5000/db_repl_image:latest
+    ports:
+      - ${DB_REPL_PORT}:5432
+    environment:
+      PGUSER: ${DB_REPL_USER}
+      PGPASSWORD: ${DB_REPL_PASSWORD}
+      DB_HOST: ${DB_HOST}
+    depends_on:
+      - postgres_primary
+
+volumes:
+  pgdata_primary:

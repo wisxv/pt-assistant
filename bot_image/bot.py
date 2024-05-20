@@ -277,6 +277,7 @@ stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
 
 # получение чувствительных данных из .env
+dotenv_filename = '.env'
 if os.path.exists(f'./{dotenv_filename}'):
     load_dotenv()
 logger.debug('Loading .env file')

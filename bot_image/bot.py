@@ -22,7 +22,7 @@ from contextlib import contextmanager
 class DatabaseErrorHandled(Exception):
     """Исключение, выбрасываемое при ошибке базы данных."""
 
-    def __init__(self, message="Ошибка при работе с базой данных."):
+    def __init__(self, message="DB error"):
         self.message = message
         super().__init__(self.message)
 
@@ -30,23 +30,9 @@ class DatabaseErrorHandled(Exception):
 class ConnectionFailedException(Exception):
     """Исключение, выбрасываемое при неудачном подключении."""
 
-    def __init__(self, message="Не удалось установить соединение."):
+    def __init__(self, message="Connection failed"):
         self.message = message
         super().__init__(self.message)
-
-
-def catch_connection_failures(func):
-    """Декоратор, отлавливающий ошибки подключения."""
-
-    def wrapper(update: Update, context: CallbackContext):
-        if not remote_machine.connected:  # Проверяем состояние соединения
-            update.message.reply_text(
-                "Не удалось установить соединение с удаленной машиной. "
-                "Попробуйте переподключиться с помощью команды /reconnect."
-            )
-            return ConversationHandler.END
-        return func(update, context)  # Выполняем функцию, если соединение установлено
-    return wrapper
 
 
 def catch_db_failures(func):
@@ -55,12 +41,13 @@ def catch_db_failures(func):
         try:
             return func(*args, **kwargs)
         except (OperationalError, InterfaceError, DatabaseError) as e:
-            logger.error(f"Ошибка базы данных: {e}")
-            raise DatabaseErrorHandled("Произошла ошибка при выполнении операции с базой данных. Попробуйте позже.")
+            logger.error(f"DB error: {e}")
+            raise DatabaseErrorHandled()
+
     return wrapper
 
 
-class RemoteMachineInfoGrabber:
+class RemoteMachine:
     def __init__(self, hostname, username, password):
         self.hostname = hostname
         self.username = username
@@ -68,30 +55,34 @@ class RemoteMachineInfoGrabber:
         self.connected = False
         self.session = paramiko.SSHClient()
         self.session.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        logger.debug(f'Attempting to connect to SSH at {self.hostname} with user {self.username}.')
-        self.try_connect()
 
-    def try_connect(self):
-        logger.info('Trying to connect via ssh')
+    @contextmanager
+    def __get_connection(self):
         try:
+            logger.info('Trying to connect via ssh')
             self.session.connect(self.hostname, username=self.username, password=self.password)
             logger.info(f'Connected to {self.hostname}')
-            self.connected = True
+            yield self.session
         except (gaierror,
                 TimeoutError,
                 paramiko.ssh_exception.NoValidConnectionsError,
                 paramiko.ssh_exception.SSHException) as e:
-            logger.error(f'Connection failed: {e}')
-            self.connected = False
+            logger.info(f'Connection failed: {e}')
+            raise ConnectionFailedException(f"ssh connection failed: {e}")
+        finally:
+            if self.connected:
+                self.session.close()
 
-    def __execute(self, command):
-        logger.debug(f'Calling remote: {command}')
-        stdin, stdout, stderr = self.session.exec_command(command)
-        err = stderr.read().decode()
-        if err not in ('', ' '):
-            logger.warning(f'Got error: {err}')
-        result = stdout.read().decode()
-        return result
+    def __execute(self, command: str) -> str:
+        with self.__get_connection() as connection:
+            stdin, stdout, stderr = connection.exec_command(command)
+            decoded_error = stderr.read().decode()
+            if ': command not found' in decoded_error:
+                logger.warning(f"Remote system doesn't support command {command}: {decoded_error}")
+                return "Remote system doesn't support command"
+            else:
+                result = stdout.read().decode()
+                return result
 
     def get_repl_logs(self):
         raw_logs = self.__execute('grep -E "ready to accept|START|STOP" /var/log/postgresql/*.log')
@@ -130,36 +121,30 @@ class RemoteMachineInfoGrabber:
     def get_mpstat(self):
         res = self.__execute('mpstat')
         if res:
-            # форматирование
-            res = [i for i in res.split('\n') if i]
-            res = res[-1]
-            res_values = res.split()
-            usr = res_values[3]
-            sys = res_values[5]
-            iowait = res_values[6]
-            idle = res_values[12]
-            output = (f"Amusing CPU life:\n"
-                      f"  - user-level code:   {usr} %\n"
-                      f"  - system-level code: {sys} %\n"
-                      f"  - i/o waiting:       {iowait} %\n"
-                      f"  - idle:              {idle} %")
-            return output
+            try:
+                # форматирование
+                res = [i for i in res.split('\n') if i]
+                res = res[-1]
+                res_values = res.split()
+                usr = res_values[3]
+                sys = res_values[5]
+                iowait = res_values[6]
+                idle = res_values[12]
+                output = (f"Amusing CPU life:\n"
+                          f"  - user-level code:   {usr} %\n"
+                          f"  - system-level code: {sys} %\n"
+                          f"  - i/o waiting:       {iowait} %\n"
+                          f"  - idle:              {idle} %")
+                return output
+            except IndexError:
+                return res
         else:
             return
 
     def get_w(self):
-        res = self.__execute('who')
+        res = self.__execute('w')
         if res:
-            # форматирование
-            res = [i for i in res.split('\n') if i]
-            tmp = []
-            for user_note in res:
-                tmp.append(' logged in '.join(user_note.split()[:2]))
-            tmp = [f'  - {i}' for i in tmp]
-            output_users = '\n'.join(tmp)
-            output = (f'Logged in users:\n'
-                      f'{output_users}')
-            return output
+            return res
         else:
             return
 
@@ -293,7 +278,7 @@ db_password = os.getenv('DB_PASSWORD')
 db_database = os.getenv('DB_DATABASE')
 
 # создание экземпляра RemoteMachineInfoGrabber
-remote_machine = RemoteMachineInfoGrabber(ssh_hostname, ssh_username, ssh_password)
+remote_machine = RemoteMachine(ssh_hostname, ssh_username, ssh_password)
 
 # создание экземпляра DataBase
 db = DataBase(database=db_database,
@@ -310,28 +295,34 @@ def send_message_or_document(update: Update, context: CallbackContext, text):
     chat_id = update.effective_chat.id
     max_message_length = 4096
 
-    if len(text) <= max_message_length:
-        context.bot.send_message(chat_id=chat_id, text=text)
+    # Проверяем, не пустая ли строка перед отправкой
+    if text and len(text.strip()) > 0:
+        if len(text) <= max_message_length:
+            context.bot.send_message(chat_id=chat_id, text=text)
+        else:
+            filename = f"{uuid4().hex}.txt"
+            try:
+                with open(filename, 'w', encoding='utf-8') as file:
+                    file.write(text)
+                context.bot.send_document(chat_id=chat_id, document=open(filename, 'rb'))
+            finally:
+                if os.path.exists(filename):
+                    os.remove(filename)
     else:
-        filename = f"{uuid4().hex}.txt"
-        try:
-            with open(filename, 'w', encoding='utf-8') as file:
-                file.write(text)
-            context.bot.send_document(chat_id=chat_id, document=open(filename, 'rb'))
-        finally:
-            if os.path.exists(filename):
-                os.remove(filename)
+        logger.error("message can't be empty")
+        # Можно также отправить сообщение об ошибке пользователю
+        context.bot.send_message(chat_id=chat_id, text="Error occurred: got empty text from internal service")
 
 
 def ask_to_database(update: Update, context: CallbackContext, info_type: str) -> int:
     # Создаем кнопки
     keyboard = [
-        [InlineKeyboardButton("Да", callback_data='да')],
-        [InlineKeyboardButton("Нет", callback_data='нет')],
+        [InlineKeyboardButton("Yes", callback_data='Yes')],
+        [InlineKeyboardButton("No", callback_data='No')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     # спрашиваем пользователя с помощью кнопок
-    update.message.reply_text("Хотите ли вы сохранить эту информацию в базе данных?", reply_markup=reply_markup)
+    update.message.reply_text("Would you like to save this data in DB?", reply_markup=reply_markup)
     # возвращаем новое состояние в зависимости от типа информации
     return SAVING_PHONE_DATA if info_type == 'phone_numbers' else SAVING_EMAIL_DATA
 
@@ -339,66 +330,53 @@ def ask_to_database(update: Update, context: CallbackContext, info_type: str) ->
 def save_email_data_decision(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
     query.answer()
-    if query.data == 'да':
+    if query.data == 'Yes':
         db.write_emails(context.user_data['email_addresses'])
-        query.edit_message_text("Email адреса были успешно сохранены в базе данных.")
+        query.edit_message_text("Emails have been successfully saved")
     else:
-        query.edit_message_text("Email адреса не были сохранены в базе данных.")
+        query.edit_message_text("Emails are not saved")
     return ConversationHandler.END
 
 
 def save_phone_data_decision(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
     query.answer()
-    if query.data == 'да':
+    if query.data == 'Yes':
         db.write_phone_numbers(context.user_data['phone_numbers'])
-        query.edit_message_text("Номера телефонов были успешно сохранены в базе данных.")
+        query.edit_message_text("Phone numbers have been successfully saved")
     else:
-        query.edit_message_text("Номера телефонов не были сохранены в базе данных.")
+        query.edit_message_text("Phone numbers are not saved")
     return ConversationHandler.END
 
 
 def start(update: Update, _context: CallbackContext) -> None:
     # Приветствие, вывод возможностей
     user = update.effective_user
-    logger.info(f'Showing greetings for: {user}')
-    possibilities = ('Я могу: '
-                     '\n-искать номера телефонов и email в тексте,'
-                     '\n-проверить твой пароль на безопасность'
-                     '\n-предоставить данные об ОС, к которой я подключен по ssh')
+    logger.info(f'Showing greetings for: {user.name} {user.last_name} ({user.id})')
+    possibilities = ('I can: '
+                     '\n  -search emails and phone numbers in text '
+                     '\n  -store them in a database'
+                     '\n  -check password strength'
+                     '\n  -display remote system data'
+                     '\n  -save data to ')
     if user.first_name:
-        logger.debug("User has name")
-        response_message = f'Привет, {user.first_name}!\n\n{possibilities}'
+        response_message = f'Hi, {user.first_name}!\n\n{possibilities}'
     else:
-        # если нет Имени пользователя
-        logger.debug("User doesn't have name")
-        response_message = f'Привет!\n\n{possibilities}'
+        response_message = f'Hi!\n\n{possibilities}'
     update.message.reply_text(response_message)
 
 
 def cancel(update: Update, _context: CallbackContext) -> int:
     # отмена операции, если пользователь выбрал команду с состоянием
     logger.info('Operation canceled')
-    update.message.reply_text("Операция отменена.")
+    update.message.reply_text("Operation canceled")
     return ConversationHandler.END
-
-
-def reconnect_cmd(update: Update, _context: CallbackContext) -> None:
-    user = update.message.from_user
-    logger.info(f"User {user.first_name} initiated a reconnect.")
-    remote_machine.try_connect()  # Снова пытаемся подключиться
-    if remote_machine.connected:
-        update.message.reply_text("Переподключение успешно.")
-        logger.info('Successfully reconnected')
-    else:
-        update.message.reply_text("Не удалось переподключиться, пожалуйста, попробуйте позже.")
-        logger.info('Failed to reconnect')
 
 
 def phone_reply(update: Update, _context: CallbackContext) -> int:
     # сообщение после получение команды о поиске номеров телефонов
-    logger.debug('Replying to phone command')
-    update.message.reply_text("Введи текст, а я найду номера телефонов:")
+    logger.info(f'find_phones dialog started: user {update.message.from_user.id} ')
+    update.message.reply_text("Type in the text, and I'll find the phone numbers:")
     return PHONE
 
 
@@ -411,7 +389,7 @@ def phone_cmd(update: Update, context: CallbackContext) -> int:
         send_message_or_document(update, context, response)
         return ask_to_database(update, context, 'phone_numbers')
     else:
-        update.message.reply_text("Номера телефонов не найдены.")
+        update.message.reply_text("Can't find phone numbers here")
         return ConversationHandler.END
 
 
@@ -446,8 +424,8 @@ def search_phone_numbers(text):
 
 def email_reply(update: Update, _context: CallbackContext) -> int:
     # сообщение после получение команды о поиске почт
-    logger.debug('Replying to phone command')
-    update.message.reply_text("Введи текст, а я найду email адреса:")
+    logger.info(f'find_emails command: user {update.message.from_user.id} ')
+    update.message.reply_text("Type in the text, and I'll find the emails:")
     return EMAIL
 
 
@@ -459,7 +437,7 @@ def email_cmd(update: Update, context: CallbackContext) -> int:
         send_message_or_document(update, context, response)
         return ask_to_database(update, context, 'email_addresses')
     else:
-        update.message.reply_text("Email адреса не найдены.")
+        update.message.reply_text("Can't find emails here")
         return ConversationHandler.END
 
 
@@ -472,7 +450,8 @@ def search_emails(text):
 
 def check_password_reply(update: Update, context: CallbackContext) -> int:
     # сообщение после получение команды о проверке пароля
-    update.message.reply_text("Введи пароль и я проверю его сложность:")
+    logger.info(f'check_password command: user {update.message.from_user.id} ')
+    update.message.reply_text("Type in password:")
     return CHECK_PASSWORD
 
 
@@ -485,9 +464,9 @@ def check_password(text):
                          not re.search(r"[0-9]", text),
                          not re.search(r"[!@#$%^&*()]", text)]
     if any(conditions_simple):
-        return 'Пароль простой :('
+        return 'Bad password'
     else:
-        return 'Пароль сложный :)'
+        return 'Good password'
 
 
 def check_password_cmd(update: Update, context: CallbackContext) -> int:
@@ -497,85 +476,85 @@ def check_password_cmd(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 
-@catch_connection_failures
 def get_release_cmd(update: Update, context: CallbackContext) -> None:
+    logger.info(f'get_release command: user {update.message.from_user.id} ')
     response = remote_machine.get_release()
     send_message_or_document(update, context, response)
 
 
-@catch_connection_failures
 def get_uname_cmd(update: Update, context: CallbackContext) -> None:
+    logger.info(f'get_uname command: user {update.message.from_user.id} ')
     response = remote_machine.get_uname()
     send_message_or_document(update, context, response)
 
 
-@catch_connection_failures
 def get_uptime_cmd(update: Update, context: CallbackContext) -> None:
+    logger.info(f'get_uptime command: user {update.message.from_user.id} ')
     response = remote_machine.get_uptime()
     send_message_or_document(update, context, response)
 
 
-@catch_connection_failures
 def get_df_cmd(update: Update, context: CallbackContext) -> None:
+    logger.info(f'get_df command: user {update.message.from_user.id} ')
     response = remote_machine.get_df()
     send_message_or_document(update, context, response)
 
 
-@catch_connection_failures
 def get_free_cmd(update: Update, context: CallbackContext) -> None:
+    logger.info(f'get_free command: user {update.message.from_user.id} ')
     response = remote_machine.get_free()
     send_message_or_document(update, context, response)
 
 
-@catch_connection_failures
 def get_mpstat_cmd(update: Update, context: CallbackContext) -> None:
+    logger.info(f'get_mpstat command: user {update.message.from_user.id} ')
     response = remote_machine.get_mpstat()
     send_message_or_document(update, context, response)
 
 
-@catch_connection_failures
 def get_w_cmd(update: Update, context: CallbackContext) -> None:
+    logger.info(f'get_w command: user {update.message.from_user.id} ')
     response = remote_machine.get_w()
     send_message_or_document(update, context, response)
 
 
-@catch_connection_failures
 def get_auths_cmd(update: Update, context: CallbackContext) -> None:
+    logger.info(f'get_auths command: user {update.message.from_user.id} ')
     response = remote_machine.get_auths()
     send_message_or_document(update, context, response)
 
 
-@catch_connection_failures
 def get_critical_cmd(update: Update, context: CallbackContext) -> None:
+    logger.info(f'get_critical command: user {update.message.from_user.id} ')
     response = remote_machine.get_critical()
     send_message_or_document(update, context, response)
 
 
-@catch_connection_failures
 def get_ps_cmd(update: Update, context: CallbackContext) -> None:
+    logger.info(f'get_ps command: user {update.message.from_user.id} ')
     response = remote_machine.get_ps()
     send_message_or_document(update, context, response)
 
 
-@catch_connection_failures
 def get_ss_cmd(update: Update, context: CallbackContext) -> None:
+    logger.info(f'get_ss command: user {update.message.from_user.id} ')
     response = remote_machine.get_ss()
     send_message_or_document(update, context, response)
 
 
-@catch_connection_failures
 def get_services_cmd(update: Update, context: CallbackContext) -> None:
+    logger.info(f'get_services command: user {update.message.from_user.id} ')
     response = remote_machine.get_services()
     send_message_or_document(update, context, response)
 
 
 def get_apt_list_reply(update: Update, context: CallbackContext) -> int:
+    logger.info(f'get_apt_list command: user {update.message.from_user.id} ')
     # сообщение после получение команды запроса данных об установленных пакетах
-    update.message.reply_text("Конкретный пакет (название) или все (!all):")
+    update.message.reply_text("Package name or all (!all):")
     return GET_APT_LIST
 
 
-@catch_connection_failures
 def get_apt_list_cmd(update: Update, context: CallbackContext) -> int:
     # обработчик для команды запроса данных об установленных пакетах
     choice = update.message.text
@@ -587,9 +566,8 @@ def get_apt_list_cmd(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 
-@catch_connection_failures
 def get_repl_logs_cmd(update: Update, context: CallbackContext) -> None:
-    logger.info('executing: get_repl_logs')
+    logger.info(f'get_repl_logs command: user {update.message.from_user.id} ')
     response = remote_machine.get_repl_logs()
     send_message_or_document(update, context, response)
 
@@ -597,16 +575,18 @@ def get_repl_logs_cmd(update: Update, context: CallbackContext) -> None:
 @catch_db_failures
 def get_emails_cmd(update: Update, context: CallbackContext) -> None:
     # Вызов метода DataBase для чтения email-ов
+    logger.info(f'get_emails command: user {update.message.from_user.id} ')
     email_addresses = db.read_emails()
-    response = "Email адреса не найдены." if not email_addresses else '\n'.join(email_addresses)
+    response = "There are no emails" if not email_addresses else '\n'.join(email_addresses)
     send_message_or_document(update, context, response)
 
 
 @catch_db_failures
 def get_phone_numbers_cmd(update: Update, context: CallbackContext) -> None:
+    logger.info(f'get_phone_numbers command: user {update.message.from_user.id} ')
     # Вызов метода DataBase для чтения телефонных номеров
     phone_numbers = db.read_phone_numbers()
-    response = "Номера телефонов не найдены." if not phone_numbers else '\n'.join(phone_numbers)
+    response = "There are no phone numbers" if not phone_numbers else '\n'.join(phone_numbers)
     send_message_or_document(update, context, response)
 
 
@@ -630,47 +610,37 @@ def main():
                       CommandHandler('check_password', check_password_reply),
                       CommandHandler('get_apt_list', get_apt_list_reply)],
 
-        states={
-            PHONE: [MessageHandler(Filters.text & ~Filters.command, phone_cmd)],
-            EMAIL: [MessageHandler(Filters.text & ~Filters.command, email_cmd)],
-            CHECK_PASSWORD: [MessageHandler(Filters.text & ~Filters.command, check_password_cmd)],
-            GET_APT_LIST: [MessageHandler(Filters.text & ~Filters.command, get_apt_list_cmd)],
-            SAVING_PHONE_DATA: [CallbackQueryHandler(save_phone_data_decision)],
-            # добавляем новые функции обработки состояния
-            SAVING_EMAIL_DATA: [CallbackQueryHandler(save_email_data_decision)],
-            # добавляем новые функции обработки состояния
-        },
+        states={PHONE: [MessageHandler(Filters.text & ~Filters.command, phone_cmd)],
+                EMAIL: [MessageHandler(Filters.text & ~Filters.command, email_cmd)],
+                CHECK_PASSWORD: [MessageHandler(Filters.text & ~Filters.command, check_password_cmd)],
+                GET_APT_LIST: [MessageHandler(Filters.text & ~Filters.command, get_apt_list_cmd)],
+                SAVING_PHONE_DATA: [CallbackQueryHandler(save_phone_data_decision)],
+                SAVING_EMAIL_DATA: [CallbackQueryHandler(save_email_data_decision)], },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     # Регистрируем ConversationHandler в Dispatcher.
 
     dispatcher.add_handler(conv_handler)
-    dispatcher.add_handler(CommandHandler('get_emails', get_emails_cmd))
-    dispatcher.add_handler(CommandHandler('get_phone_numbers', get_phone_numbers_cmd))
 
-    get_commands = {
-        'get_release': get_release_cmd,
-        'get_uname': get_uname_cmd,
-        'get_uptime': get_uptime_cmd,
-        'get_df': get_df_cmd,
-        'get_free': get_free_cmd,
-        'get_mpstat': get_mpstat_cmd,
-        'get_w': get_w_cmd,
-        'get_auths': get_auths_cmd,
-        'get_critical': get_critical_cmd,
-        'get_ps': get_ps_cmd,
-        'get_ss': get_ss_cmd,
-        'get_services': get_services_cmd
-    }
+    get_commands = {'get_phone_numbers': get_phone_numbers_cmd,
+                    'get_emails': get_emails_cmd,
+                    'get_release': get_release_cmd,
+                    'get_uname': get_uname_cmd,
+                    'get_uptime': get_uptime_cmd,
+                    'get_df': get_df_cmd,
+                    'get_free': get_free_cmd,
+                    'get_mpstat': get_mpstat_cmd,
+                    'get_w': get_w_cmd,
+                    'get_auths': get_auths_cmd,
+                    'get_critical': get_critical_cmd,
+                    'get_ps': get_ps_cmd,
+                    'get_ss': get_ss_cmd,
+                    'get_services': get_services_cmd,
+                    'get_repl_logs': get_repl_logs_cmd}
 
     # Добавляем обработчики команд из словаря в Dispatcher
     for cmd, func in get_commands.items():
         dispatcher.add_handler(CommandHandler(cmd, func))
-
-    # Добавляем обработчик для команды повторного подключения
-    dispatcher.add_handler(CommandHandler('reconnect', reconnect_cmd))
-
-    dispatcher.add_handler(CommandHandler('get_repl_logs', get_repl_logs_cmd))
 
     # бот будет регулярно, в активном режиме, опрашивать сервера Telegram на предмет новых сообщений
     logger.info("Telegram bot started polling for updates.")
@@ -682,3 +652,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

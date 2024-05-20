@@ -105,25 +105,21 @@
     when: "'bot' in group_names"
   
   - name: Установка PostgreSQL
-      apt:
-        name:
-          - postgresql
-          - postgresql-contrib
-        state: present
-        update_cache: yes
-      become: yes
-      when: "'db_main' in group_names or 'db_repl' in group_names"
-      
-  - name: Обновление списка пакетов
     apt:
+      name:
+        - postgresql
+        - postgresql-contrib
+      state: present
       update_cache: yes
     become: yes
-
+    when: "'db_main' in group_names or 'db_repl' in group_names"
+    
   - name: Установка OpenSSH-сервера
     apt:
       name: openssh-server
       state: latest
     become: yes
+    when: "'db_main' in group_names"
 
   - name: Создание нового пользователя для удаленного доступа
     user:
@@ -132,6 +128,7 @@
       password: "{{ RM_PASSWORD | password_hash('sha512') }}"
       state: present
     become: yes
+    when: "'db_main' in group_names"
 
   - name: Разрешение аутентификации по паролю в SSH
     lineinfile:
@@ -140,6 +137,7 @@
       line: 'PasswordAuthentication yes'
       state: present
     become: yes
+    when: "'db_main' in group_names"
     notify: Restart SSH
 
   - name: Перезапуск SSH-сервера
@@ -148,51 +146,51 @@
       state: restarted
       enabled: yes
     become: yes
-    when: "'ssh_restart' in ansible_facts.services"
+    when: "'db_main' in group_names" and "'ssh_restart' in ansible_facts.services"
       
   - name: Настройка postgresql, main, postgresql.conf
-      template:
-        src: postgresql.conf.j2
-        dest: /etc/postgresql/{{ postgresql_version }}/main/postgresql.conf
-      become: yes
-      when: "'db_main' in group_names"
+    template:
+      src: postgresql.conf.j2
+      dest: /etc/postgresql/{{ postgresql_version }}/main/postgresql.conf
+    become: yes
+    when: "'db_main' in group_names"
       
   - name: Настройка postgresql, main, pb_hba.conf
-      template:
-        src: pg_hba.conf.j2
-        dest: /etc/postgresql/{{ postgresql_version }}/main/pg_hba.conf
-      become: yes
-      when: "'db_main' in group_names"
+    template:
+      src: pg_hba.conf.j2
+      dest: /etc/postgresql/{{ postgresql_version }}/main/pg_hba.conf
+    become: yes
+    when: "'db_main' in group_names"
       
   - name: Копирование .pgpass для replica
-      template:
-        src: pgpass.j2
-        dest: ~/.pgpass
-        mode: 0600
-      become: yes
-      when: "'db_replica' in group_names"
+    template:
+      src: pgpass.j2
+      dest: ~/.pgpass
+      mode: 0600
+    become: yes
+    when: "'db_replica' in group_names"
       
   - name: Перезапуск postgresql
-	    systemd:
-	      name: postgresql
-	      state: restarted
-	      enabled: yes
-	    become: yes
-	    when: "'db_main' in group_names"
+	  systemd:
+	    name: postgresql
+	    state: restarted
+	    enabled: yes
+	  become: yes
+	  when: "'db_main' in group_names"
       
   - name: Смена пароля администратора
-      become: yes
-      become_user: postgres
-      shell: "psql -c \"ALTER ROLE {{ POSTGRES_USER }} PASSWORD '{{ POSTGRES_PASSWORD }}';\""
-      when: "'db_main' in group_names"
+    become: yes
+    become_user: postgres
+    shell: "psql -c \"ALTER ROLE {{ POSTGRES_USER }} PASSWORD '{{ POSTGRES_PASSWORD }}';\""
+    when: "'db_main' in group_names"
       
   - name: Пользователь для репликации
-      postgresql_user:
-        name: "{{ DB_REPL_USER }}"
-        password: "{{ DB_REPL_PASSWORD }}"
-        role_attr_flags: REPLICATION
-      become: yes
-      when: "'db_main' in group_names"
+    postgresql_user:
+      name: "{{ DB_REPL_USER }}"
+      password: "{{ DB_REPL_PASSWORD }}"
+      role_attr_flags: REPLICATION
+    become: yes
+    when: "'db_main' in group_names"
       
   - name: Создание базы данных
     postgresql_db:
@@ -218,9 +216,9 @@
             id SERIAL PRIMARY KEY,
             phone_number VARCHAR(20) NOT NULL
         );
-  become: yes
-  become_user: postgres
-  when: "'db_main' in group_names"
+    become: yes
+    become_user: postgres
+    when: "'db_main' in group_names"
     
   - name: Создание пользователя базы данных
     postgresql_user:
@@ -243,21 +241,21 @@
         GRANT SELECT, INSERT ON TABLE phone TO {{ DB_USER }};
         GRANT USAGE, SELECT ON SEQUENCE email_id_seq TO {{ DB_USER }};
         GRANT USAGE, SELECT ON SEQUENCE phone_id_seq TO {{ DB_USER }};
-      become: yes
-      become_user: postgres
-      when: "'db_main' in group_names"
+    become: yes
+    become_user: postgres
+    when: "'db_main' in group_names"
       
   - name: Настройка прав на сервере для репликации
-      file:
-        path: "/var/lib/postgresql/{{ postgresql_version }}/main/"
-        owner: postgres
-        group: postgres
-        state: directory
-        recurse: yes
-      become: yes
-      when: "'db_replica' in group_names"
+    file:
+      path: "/var/lib/postgresql/{{ postgresql_version }}/main/"
+      owner: postgres
+      group: postgres
+      state: directory
+      recurse: yes
+    become: yes
+    when: "'db_replica' in group_names"
       
-  - name: Перезапуск replica для применения конфигурации
+    - name: Перезапуск replica для применения конфигурации
       service:
         name: postgresql
         state: restarted

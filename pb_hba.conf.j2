@@ -5,5 +5,5 @@ host    all             all             ::1/128                 trust
 local   replication     all                                     peer
 host    replication     all             127.0.0.1/32            scram-sha-256
 host    replication     all             ::1/128                 scram-sha-256
-host	all		{{ DB_USER }}		{{ BOT_HOST }}/32	password
-host	replication	{{ DB_REPL_USER }}	{{ DB_REPL_HOST }}/32	md5
+host    all             {{ DB_USER }}   {{ BOT_HOST }}/32        password
+host    replication     {{ DB_REPL_USER }} 0.0.0.0/0             md5

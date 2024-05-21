@@ -3,257 +3,288 @@
   hosts: all
   tasks:
   
-  - name: установка переменных окружения
-    include_vars:
-      file: ./.env
+    - name: установка переменных окружения
+      include_vars:
+        file: ./.env
       
-  - name: создание директории для бота
-    file:
-      path: "{{ bot_app_path }}"
-      state: directory
-      mode: '0755'
-    become: yes
-    when: "'bot' in group_names"
-
-  - name: Установка Python
-    apt:
-      name:
-        - python3
-        - python3-pip
-      state: present
-      update_cache: yes
-    become: yes
-    when: "'bot' in group_names"
-
-  - name: Скачивание файла bot.py
-    get_url:
-      url: "https://raw.githubusercontent.com/wisxv/pt-assistant/main/bot_image/bot.py"
-      dest: "{{ bot_app_path }}/bot.py"
-      mode: '0755'
-    become: yes
-    when: "'bot' in group_names"
-
-  - name: Скачивание файла requirements.txt
-    get_url:
-      url: "https://raw.githubusercontent.com/wisxv/pt-assistant/main/bot_image/requirements.txt"
-      dest: "{{ bot_app_path }}/requirements.txt"
-      mode: '0644'
-    become: yes
-    when: "'bot' in group_names"
-
-  - name: Установка зависимостей приложения
-  block:
-    - pip:
-        requirements: "{{ bot_app_path }}/requirements.txt"
+    - name: создание директории для бота
+      file:
+        path: "{{ bot_app_path }}"
+        state: directory
+        mode: '0755'
       become: yes
       when: "'bot' in group_names"
-  rescue:
-    - name: Установка psycopg2-binary в случае ошибки
-      pip:
-        name: psycopg2-binary
+
+    - name: Установка Python
+      apt:
+        name:
+          - python3
+          - python3-pip
         state: present
+        update_cache: yes
       become: yes
       when: "'bot' in group_names"
 
-    - name: Установка python-dotenv в случае ошибки
-      pip:
-        name: python-dotenv==1.0.1
+    - name: Скачивание файла bot.py
+      get_url:
+        url: "https://raw.githubusercontent.com/wisxv/pt-assistant/main/bot_image/bot.py"
+        dest: "{{ bot_app_path }}/bot.py"
+        mode: '0755'
+      become: yes
+      when: "'bot' in group_names"
+
+    - name: Скачивание файла requirements.txt
+      get_url:
+        url: "https://raw.githubusercontent.com/wisxv/pt-assistant/main/bot_image/requirements.txt"
+        dest: "{{ bot_app_path }}/requirements.txt"
+        mode: '0644'
+      become: yes
+      when: "'bot' in group_names"
+
+    - name: Установка зависимостей приложения
+      block:
+        - pip:
+            requirements: "{{ bot_app_path }}/requirements.txt"
+            become: yes
+          when: "'bot' in group_names"
+      rescue:
+        - name: Установка psycopg2-binary в случае ошибки
+          pip:
+            name: psycopg2-binary
+            state: present
+          become: yes
+          when: "'bot' in group_names"
+
+        - name: Установка python-dotenv в случае ошибки
+          pip:
+            name: python-dotenv==1.0.1
+            state: present
+          become: yes
+          when: "'bot' in group_names"
+
+        - name: Установка paramiko в случае ошибки
+          pip:
+            name: paramiko==3.4.0
+            state: present
+          become: yes
+          when: "'bot' in group_names"
+
+        - name: Установка python-telegram-bot в случае ошибки
+          pip:
+            name: python-telegram-bot==13.15
+            state: present
+          become: yes
+          when: "'bot' in group_names"
+
+    - name: Создание файла .env для бота
+      template:
+        src: bot.env.j2
+        dest: "{{ bot_app_path }}/.env"
+      become: yes
+      when: "'bot' in group_names"
+
+    - name: systemd сервис бота
+      template:
+        src: bot.service.j2
+        dest: /etc/systemd/system/{{ bot_service_name }}.service
+      become: yes
+      when: "'bot' in group_names"
+
+    - name: перезапуск systemd daemon
+      systemd:
+        daemon-reload: true
+      become: yes
+      when: "'bot' in group_names"
+
+    - name: включение сервиса бота
+      systemd:
+        name: "{{ bot_service_name }}"
+        state: started
+        enabled: yes
+      become: yes
+      when: "'bot' in group_names"
+
+    - name: Установка PostgreSQL
+      apt:
+        name:
+          - postgresql
+          - postgresql-contrib
         state: present
+        update_cache: yes
       become: yes
-      when: "'bot' in group_names"
+      when: "'db_main' in group_names or 'db_replica' in group_names"
+    
+      
+    - name: Настройка db_main - postgresql.conf
+      template:
+        src: ./postgresql.conf.j2
+        dest: /etc/postgresql/{{ postgresql_version }}/main/postgresql.conf
+      become: yes
+      when: "'db_main' in group_names"
+      
+    - name: Настройка postgresql, main, pg_hba.conf
+      template:
+        src: ./pg_hba.conf.j2
+        dest: /etc/postgresql/{{ postgresql_version }}/main/pg_hba.conf
+      become: yes
+      when: "'db_main' in group_names"
+      
+    - name: Перезапуск postgresql
+      systemd:
+        name: postgresql
+        state: restarted
+        enabled: yes
+      become: yes
+      when: "'db_main' in group_names"
+      
+    - name: Смена пароля администратора
+      become: yes
+      become_user: postgres
+      shell: "psql -c \"ALTER ROLE {{ POSTGRES_USER }} PASSWORD '{{ POSTGRES_PASSWORD }}';\""
+      when: "'db_main' in group_names"
+    
+    - name: Пользователь для репликации
+      postgresql_user:
+        name: "{{ DB_REPL_USER }}"
+        password: "{{ DB_REPL_PASSWORD }}"
+        role_attr_flags: REPLICATION
+        login_host: localhost
+        login_port: "{{DB_PORT}}"
+        login_user: "{{ POSTGRES_USER }}"
+      become: yes
+      when: "'db_main' in group_names"
 
-    - name: Установка paramiko в случае ошибки
-      pip:
-        name: paramiko==3.4.0
+    - name: Создание базы данных
+      postgresql_db:
+        name: "{{ DB_DATABASE }}"
         state: present
+        login_user: "{{ POSTGRES_USER }}"
+        login_password: "{{ POSTGRES_PASSWORD }}"
+        login_host: localhost
+        login_port: "{{DB_PORT}}"
       become: yes
-      when: "'bot' in group_names"
-
-    - name: Установка python-telegram-bot в случае ошибки
-      pip:
-        name: python-telegram-bot==13.15
+      become_user: postgres
+      when: "'db_main' in group_names"
+    
+    - name: Создание таблиц email и phone
+      postgresql_query:
+        login_port: "{{DB_PORT}}"
+        login_host: localhost
+        login_user: "{{ POSTGRES_USER }}"
+        login_password: "{{ POSTGRES_PASSWORD }}"
+        db: "{{ DB_DATABASE }}"
+        query: |
+          CREATE TABLE IF NOT EXISTS email (
+              id SERIAL PRIMARY KEY,
+              email VARCHAR(255) NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS phone (
+              id SERIAL PRIMARY KEY,
+              phone_number VARCHAR(20) NOT NULL
+          );
+      become: yes
+      become_user: postgres
+      when: "'db_main' in group_names"
+      
+    
+    - name: Создание пользователя базы данных
+      postgresql_user:
+        name: "{{ DB_USER }}"
+        password: "{{ DB_PASSWORD }}"
         state: present
+        login_user: "{{ POSTGRES_USER }}"
+        login_password: "{{ POSTGRES_PASSWORD }}"
+        login_port: "{{DB_PORT}}"
+        login_host: localhost
       become: yes
-      when: "'bot' in group_names"
-
-  - name: Создание файла .env для бота
-    template:
-      src: bot.env.j2
-      dest: "{{ bot_app_path }}/.env"
-    become: yes
-    when: "'bot' in group_names"
-
-  - name: systemd сервис бота
-    template:
-      src: bot.service.j2
-      dest: /etc/systemd/system/{{ bot_service_name }}.service
-    become: yes
-    when: "'bot' in group_names"
-
-  - name: перезапуск systemd daemon
-    systemd:
-      daemon-reload: true
-    become: yes
-    when: "'bot' in group_names"
-
-  - name: включение сервиса бота
-    systemd:
-      name: "{{ bot_service_name }}"
-      state: started
-      enabled: yes
-    become: yes
-    when: "'bot' in group_names"
+      become_user: postgres
+      when: "'db_main' in group_names"
   
-  - name: Установка PostgreSQL
-    apt:
-      name:
-        - postgresql
-        - postgresql-contrib
-      state: present
-      update_cache: yes
-    become: yes
-    when: "'db_main' in group_names or 'db_repl' in group_names"
-    
-  - name: Установка OpenSSH-сервера
-    apt:
-      name: openssh-server
-      state: latest
-    become: yes
-    when: "'db_main' in group_names"
+    - name: Применить привилегии для чтения и записи
+      postgresql_query:
+        login_port: "{{DB_PORT}}"
+        login_host: localhost
+        login_user: postgres
+        login_password: "{{ POSTGRES_PASSWORD }}"
+        db: "{{ DB_DATABASE }}"
+        query: |
+          GRANT SELECT, INSERT ON TABLE email TO {{ DB_USER }};
+          GRANT SELECT, INSERT ON TABLE phone TO {{ DB_USER }};
+          GRANT USAGE, SELECT ON SEQUENCE email_id_seq TO {{ DB_USER }};
+          GRANT USAGE, SELECT ON SEQUENCE phone_id_seq TO {{ DB_USER }};
+      become: yes
+      become_user: postgres
+      when: "'db_main' in group_names"
+      
+    - name: Создание каталога архива
+      file:
+        path: /oracle/pg_data/archive/
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: '0755'
+      become: yes
+      when: "'db_main' in group_names"
 
-  - name: Создание нового пользователя для удаленного доступа
-    user:
-      name: "{{ RM_USER }}"
-      shell: /bin/bash
-      password: "{{ RM_PASSWORD | password_hash('sha512') }}"
-      state: present
-    become: yes
-    when: "'db_main' in group_names"
+    - name: Установка прав на каталог архива
+      file:
+        path: /oracle/pg_data/archive/
+        owner: postgres
+        group: postgres
+        mode: '0755'
+      become: yes
+      when: "'db_main' in group_names"
+      
+    - name: Изменение владельца и группы каталога /oracle
+      file:
+        path: /oracle
+        owner: postgres
+        group: postgres
+        recurse: yes
+      become: yes
+      when: "'db_main' in group_names"
+      
+    - name: Установка OpenSSH-сервера
+      apt:
+        name: openssh-server
+        state: latest
+      become: yes
+      when: "'db_main' in group_names"
 
-  - name: Разрешение аутентификации по паролю в SSH
-    lineinfile:
-      path: /etc/ssh/sshd_config
-      regexp: '^#?PasswordAuthentication'
-      line: 'PasswordAuthentication yes'
-      state: present
-    become: yes
-    when: "'db_main' in group_names"
-    notify: Restart SSH
+    - name: Создание нового пользователя для удаленного доступа
+      user:
+        name: "{{ RM_USER }}"
+        shell: /bin/bash
+        password: "{{ RM_PASSWORD | password_hash('sha512') }}"
+        state: present
+      become: yes
+      when: "'db_main' in group_names"
 
-  - name: Перезапуск SSH-сервера
-    systemd:
-      name: ssh
-      state: restarted
-      enabled: yes
-    become: yes
-    when: "'db_main' in group_names" and "'ssh_restart' in ansible_facts.services"
-      
-  - name: Настройка postgresql, main, postgresql.conf
-    template:
-      src: postgresql.conf.j2
-      dest: /etc/postgresql/{{ postgresql_version }}/main/postgresql.conf
-    become: yes
-    when: "'db_main' in group_names"
-      
-  - name: Настройка postgresql, main, pb_hba.conf
-    template:
-      src: pg_hba.conf.j2
-      dest: /etc/postgresql/{{ postgresql_version }}/main/pg_hba.conf
-    become: yes
-    when: "'db_main' in group_names"
-      
-  - name: Копирование .pgpass для replica
-    template:
-      src: pgpass.j2
-      dest: ~/.pgpass
-      mode: 0600
-    become: yes
-    when: "'db_replica' in group_names"
-      
-  - name: Перезапуск postgresql
-	  systemd:
-	    name: postgresql
-	    state: restarted
-	    enabled: yes
-	  become: yes
-	  when: "'db_main' in group_names"
-      
-  - name: Смена пароля администратора
-    become: yes
-    become_user: postgres
-    shell: "psql -c \"ALTER ROLE {{ POSTGRES_USER }} PASSWORD '{{ POSTGRES_PASSWORD }}';\""
-    when: "'db_main' in group_names"
-      
-  - name: Пользователь для репликации
-    postgresql_user:
-      name: "{{ DB_REPL_USER }}"
-      password: "{{ DB_REPL_PASSWORD }}"
-      role_attr_flags: REPLICATION
-    become: yes
-    when: "'db_main' in group_names"
-      
-  - name: Создание базы данных
-    postgresql_db:
-      name: {{ DB_DATABASE }}
-      state: present
-      login_user: "{{ POSTGRES_USER }}"
-      login_password: "{{ POSTGRES_PASSWORD }}"
-    become: yes
-    become_user: postgres
-    when: "'db_main' in group_names"
+    - name: Разрешение аутентификации по паролю в SSH
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication yes'
+        state: present
+      become: yes
+      when: "'db_main' in group_names"
+      notify: Restart SSH
+
+    - name: Перезапуск SSH-сервера
+      systemd:
+        name: ssh
+        state: restarted
+        enabled: yes
+      become: yes
+      when: ("'db_main' in group_names") and ("'ssh_restart' in ansible_facts.services")
     
-  - name: Создание таблиц email и phone
-    postgresql_query:
-      login_user: "{{ POSTGRES_USER }}"
-      login_password: "{{ POSTGRES_PASSWORD }}"
-      db: "{{ DB_DATABASE }}"
-      query: |
-        CREATE TABLE IF NOT EXISTS email (
-            id SERIAL PRIMARY KEY,
-            email VARCHAR(255) NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS phone (
-            id SERIAL PRIMARY KEY,
-            phone_number VARCHAR(20) NOT NULL
-        );
-    become: yes
-    become_user: postgres
-    when: "'db_main' in group_names"
-    
-  - name: Создание пользователя базы данных
-    postgresql_user:
-      name: {{ DB_USER }}
-      password: {{ DB_PASSWORD }}
-      state: present
-      login_user: "{{ POSTGRES_USER }}"
-      login_password: "{{ POSTGRES_PASSWORD }}"
-    become: yes
-    become_user: postgres
-    when: "'db_main' in group_names"
-  
-  - name: Применить привилегии для чтения и записи
-    postgresql_query:
-      login_user: postgres
-      login_password: "{{ POSTGRES_PASSWORD }}"
-      db: "{{ db_name }}"
-      query: |
-        GRANT SELECT, INSERT ON TABLE email TO {{ DB_USER }};
-        GRANT SELECT, INSERT ON TABLE phone TO {{ DB_USER }};
-        GRANT USAGE, SELECT ON SEQUENCE email_id_seq TO {{ DB_USER }};
-        GRANT USAGE, SELECT ON SEQUENCE phone_id_seq TO {{ DB_USER }};
-    become: yes
-    become_user: postgres
-    when: "'db_main' in group_names"
-      
-  - name: Настройка прав на сервере для репликации
-    file:
-      path: "/var/lib/postgresql/{{ postgresql_version }}/main/"
-      owner: postgres
-      group: postgres
-      state: directory
-      recurse: yes
-    become: yes
-    when: "'db_replica' in group_names"
+    - name: Копирование .pgpass для replica
+      template:
+        src: ./pgpass.j2
+        dest: ~/.pgpass
+        mode: 0600
+      become: yes
+      when: "'db_replica' in group_names"
       
     - name: Перезапуск replica для применения конфигурации
       service:
@@ -262,7 +293,7 @@
       become: yes
       when: "'db_replica' in group_names"
 
-    - name:остановка replica
+    - name: остановка replica
       service:
         name: postgresql
         state: stopped
@@ -275,9 +306,14 @@
         state: absent
       become: yes
       when: "'db_replica' in group_names"
+      
+    - name: Предоставление пользователю sshuser прав на чтение /var/log/postgresql/
+      ansible.builtin.command: 
+        cmd: chmod -R o+r /var/log/postgresql/
+      become: yes
 
     - name: репликация
-      command: "pg_basebackup -R -h {{ DB_HOST }} -U {{ DB_REPL_USER }} -D /var/lib/postgresql/{{ postgresql_version }}/main"
+      command: "pg_basebackup -R -h {{ DB_HOST }} -U {{ DB_REPL_USER }} -D /var/lib/postgresql/14/main -P -p {{ DB_PORT }}"
       become: yes
       when: "'db_replica' in group_names"
 
@@ -287,3 +323,11 @@
         state: started
       become: yes
       when: "'db_replica' in group_names"
+      
+  handlers:
+    - name: Restart SSH
+      systemd:
+        name: ssh
+        state: restarted
+        enabled: yes
+      become: yes
